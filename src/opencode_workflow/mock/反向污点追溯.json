@@ -1,0 +1,8 @@
+{
+  "parts": [
+    {
+      "type": "text",
+      "text": "根据sink点第224行代码，逆向追溯 `$imgfile` 的来源。\n\n## 分析过程\n\n查看第224行上下文：\n```php\n224: move_uploaded_file($tmpFile, $imgfile);\n```\n\n向上追溯 `$imgfile` 的赋值：\n\n**第203行**：`$imgfile = $cfg_basedir.$iurl;`\n\n追溯 `$iurl` 来源：\n\n**第200行**：`$iurl = stripslashes(${'imgurl'.$i});`\n\n其中 `$i` 来自循环变量：\n\n**第196行**：`$ids = json_decode(stripslashes($albumIds), true);`\n\n`$albumIds` 是外部HTTP输入（未经过滤）。\n\n---\n\n## 传播链输出\n\n链 #1 - 场景: 通过albumIds控制图集图片idx，再通过imgurl控制目标文件路径进行文件移动\n```\n224: move_uploaded_file($tmpFile, $imgfile);\n↑  album_edit.php:203  拼接路径: $imgfile = $cfg_basedir.$iurl\n↑  album_edit.php:200  动态变量获取: $iurl = stripslashes(${'imgurl'.$i})\n↑  album_edit.php:196  解析JSON数组: $ids = json_decode(stripslashes($albumIds), true)\nSRC: $_POST['albumIds'] (外部输入，可控)\n```\n\n**关键发现**：\n- `$imgfile` 路径完全由用户输入控制（`$iurl` 来自 `${'imgurl'.$i}` 动态变量）\n- 虽然拼接了 `$cfg_basedir`，但 `$iurl` 本身可包含路径穿越（如 `../../test.php`）\n- 存在**目录遍历漏洞**，可利用move_uploaded_file将上传文件移动到任意位置\n\n**净化点**：\n- `stripslashes()` — 仅去除转义反斜杠，**无法防止路径遍历**\n- `(int) $i` — 仅对索引做整数转换，不对 `$iurl` 做校验\n\n**结论**：目标变量 `$imgfile` 可被用户完全控制，存在路径穿越漏洞。"
+    }
+  ]
+}

@@ -20,6 +20,7 @@ class OrchState(TypedDict, total=False):
     sink_index: int                       # 当前正在处理的 sink 下标（0-based）
     sink_total: int                       # sink 总数
     trace_report: str                     # 当前 sink 的追溯报告
+    trace_verdict: str                    # 追溯判定: "controllable" | "uncontrollable"
     verify_report: str                    # 当前 sink 的漏洞验证报告
     final_report: str                     # 最终汇总报告
     build_info: str                      # CMS 搭建信息（markdown），拼入验证提示词

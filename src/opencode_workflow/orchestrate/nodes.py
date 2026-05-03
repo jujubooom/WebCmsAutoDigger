@@ -17,6 +17,71 @@ _SKILL_SOURCE = os.path.join(os.path.dirname(__file__), "..", "skills")
 # sss sink 扫描二进制
 _SSS_BIN = os.path.join(os.path.dirname(__file__), "..", "helper", "sss")
 
+# 知识库文件名
+_TRACE_KB = "trace_kb.md"
+_VERIFY_KB = "verify_kb.md"
+
+# 验证脚本目录
+_VERIFY_SCRIPTS = "verify_scripts"
+
+# 追溯反思（简洁 KB 沉淀）
+_TRACE_REFLECTION = (
+    "回顾刚才的追溯过程，有没有调用路径遗漏、分析不够深入或走弯路的地方？\n"
+    "下次做类似追溯，你会怎么提示自己做得更准更快？\n\n"
+    "格式：一个 # 一级标题（不超过15个字），下面1-3句简短说明。"
+)
+
+# 追溯可控判定
+_VERDICT_PROMPT = (
+    "请判定以上追溯结果中，该 sink 点的调用链是否可控（能否被攻击者利用）。\n"
+    "只回复一个词：可控 或 不可控。不要输出其他内容。"
+)
+
+# 验证反思：先总结踩坑经验（必做）
+_VERIFY_KB_PROMPT = (
+    "请总结这次验证中的踩坑经验，格式：一个 # 一级标题（不超过15个字），正文1-3句。"
+)
+
+# 验证反思：再封装可复用脚本（选做），{WORKSPACE} 由节点替换为绝对路径
+_VERIFY_SCRIPT_PROMPT = (
+    "回顾这次验证过程，有没有哪些步骤可以封装成脚本重复利用？\n"
+    "如果有，请把脚本写到 {WORKSPACE}/verify_scripts/ 目录下。\n\n"
+    "然后在回复中按以下格式输出每个脚本的登记信息（我会自动追加到 verify_kb.md）：\n\n"
+    "```\n"
+    "# <脚本文件名>\n"
+    "用途：<一句话描述>\n"
+    "适用场景：<什么情况下调用>\n"
+    "```\n\n"
+    "如果没有可封装的步骤，直接回复「无」。"
+)
+
+
+def _read_kb(workspace: str, name: str) -> str:
+    """读取知识库内容，不存在则返回空"""
+    path = os.path.join(workspace, name)
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            return f.read().strip()
+    return ""
+
+
+def _append_kb(workspace: str, name: str, content: str):
+    """追加一条经验到知识库"""
+    path = os.path.join(workspace, name)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(content.strip() + "\n\n")
+
+
+def _list_scripts(workspace: str, dirname: str) -> str:
+    """列出脚本目录下的文件路径"""
+    scripts_dir = os.path.join(workspace, dirname)
+    if not os.path.isdir(scripts_dir):
+        return ""
+    names = sorted(os.listdir(scripts_dir))
+    if not names:
+        return ""
+    return "\n".join(f"- {dirname}/{n}" for n in names)
+
 
 def _record_session(state: OrchState, task, title: str, session_id: str) -> str:
     """记录 session 对应的可视化 URL，供报告展示。返回 URL 字符串。"""
@@ -190,6 +255,20 @@ def node_autobuild(state: OrchState) -> OrchState:
     print(f"构建完成，报告已生成: {build_info_path}")
 
     state["build_info"] = report
+
+    # 沉淀构建经验到知识库
+    kb_prompt = (
+        "搭建工作已完成。请总结在该 CMS 中进行代码审计时需要注意的问题，"
+        "这些经验将提供给后续的污点追溯和漏洞验证 agent 参考。\n\n"
+        "格式要求：只使用一个 # 一级标题，下面用1-3句简短文字说明。"
+    )
+    kb_result = sess.send_poll(kb_prompt, agent="webcms_builder", model=model)
+    kb_text = "\n".join(p["text"] for p in kb_result.get("parts", []) if p["type"] == "text")
+    if kb_text.strip():
+        _append_kb(workspace, _TRACE_KB, kb_text)
+        _append_kb(workspace, _VERIFY_KB, kb_text)
+        print("构建经验已沉淀到知识库")
+
     return state
 
 
@@ -277,7 +356,7 @@ def node_load_dede(state: OrchState) -> OrchState:
     with open(dede_path, encoding="utf-8") as f:
         all_items = json.load(f)
 
-    state["dede_items"] = all_items[0:10]
+    state["dede_items"] = all_items[40:45]
     state["sink_total"] = len(all_items)
 
     # 断点续跑：读取 progress.json，跳过已完成的
@@ -326,6 +405,18 @@ def node_reverse_trace(state: OrchState) -> OrchState:
         .replace("{VAR_NAME}",        var_name)
         .replace("{VAR_SHORT_NAME}",  var_short))
 
+    # 读入历史追溯经验 + 可用脚本
+    workspace = state["directory"]
+    prefix = ""
+    kb = _read_kb(workspace, _TRACE_KB)
+    if kb:
+        prefix += f"## 历史追溯经验\n\n{kb}\n\n"
+    scripts = _list_scripts(workspace, _VERIFY_SCRIPTS)
+    if scripts:
+        prefix += f"## 可用验证脚本（按需调用）\n\n{scripts}\n\n"
+    if prefix:
+        prompt = f"{prefix}---\n\n## 当前任务\n\n{prompt}"
+
     task = state["task"]
     title = f"追溯-#{idx + 1}"
     sess = task.create_session(title)
@@ -338,6 +429,25 @@ def node_reverse_trace(state: OrchState) -> OrchState:
     text_parts = [p["text"] for p in result.get("parts", []) if p["type"] == "text"]
     state["trace_report"] = "\n".join(text_parts)
     print(f"[{idx + 1}/{total}] 追溯完成")
+
+    # 判定调用链可控性
+    try:
+        v = sess.send(_VERDICT_PROMPT, agent="sink_reverse_digger", model=model, _timeout=30)
+        v_text = "\n".join(p["text"] for p in v.get("parts", []) if p["type"] == "text").strip()
+        verdict = "controllable" if "可控" in v_text and "不可控" not in v_text else "uncontrollable"
+    except Exception:
+        verdict = "controllable"  # 判定失败默认走验证
+    state["trace_verdict"] = verdict
+    label = "可控" if verdict == "controllable" else "不可控"
+    print(f"[{idx + 1}/{total}] 判定: {label}")
+
+    # 沉淀追溯经验
+    reflect = sess.send_poll(_TRACE_REFLECTION, agent="sink_reverse_digger", model=model)
+    reflect_text = "\n".join(p["text"] for p in reflect.get("parts", []) if p["type"] == "text")
+    if reflect_text.strip():
+        _append_kb(workspace, _TRACE_KB, reflect_text)
+        print(f"[{idx + 1}/{total}] 经验已沉淀")
+
     return state
 
 
@@ -362,6 +472,18 @@ def node_verify_vuln(state: OrchState) -> OrchState:
         f"# 追溯报告\n\n{trace_report}"
     )
 
+    # 读入历史验证经验 + 可用脚本
+    workspace = state["directory"]
+    prefix = ""
+    kb = _read_kb(workspace, _VERIFY_KB)
+    if kb:
+        prefix += f"## 历史验证经验\n\n{kb}\n\n"
+    scripts = _list_scripts(workspace, _VERIFY_SCRIPTS)
+    if scripts:
+        prefix += f"## 可用脚本（可直接调用）\n\n{scripts}\n\n"
+    if prefix:
+        user_prompt = f"{prefix}---\n\n## 当前任务\n\n{user_prompt}"
+
     task = state["task"]
     title = f"验证-#{idx + 1}"
     sess = task.create_session(title)
@@ -374,6 +496,21 @@ def node_verify_vuln(state: OrchState) -> OrchState:
     text_parts = [p["text"] for p in result.get("parts", []) if p["type"] == "text"]
     state["verify_report"] = "\n".join(text_parts)
     print(f"[{idx + 1}/{total}] 验证完成")
+
+    # 沉淀验证经验（先踩坑总结，再封装脚本）
+    kb_result = sess.send_poll(_VERIFY_KB_PROMPT, agent="debuuger", model=model)
+    kb_text = "\n".join(p["text"] for p in kb_result.get("parts", []) if p["type"] == "text")
+    if kb_text.strip():
+        _append_kb(workspace, _VERIFY_KB, kb_text)
+        print(f"[{idx + 1}/{total}] 经验已沉淀")
+
+    script_prompt = _VERIFY_SCRIPT_PROMPT.replace("{WORKSPACE}", workspace)
+    script_result = sess.send_poll(script_prompt, agent="debuuger", model=model)
+    script_text = "\n".join(p["text"] for p in script_result.get("parts", []) if p["type"] == "text")
+    if script_text.strip() and script_text.strip() != "无":
+        _append_kb(workspace, _VERIFY_KB, script_text)
+        print(f"[{idx + 1}/{total}] 脚本已生成并登记到 KB")
+
     return state
 
 
@@ -391,9 +528,14 @@ def node_save_sink(state: OrchState) -> OrchState:
     with open(trace_path, "w", encoding="utf-8") as f:
         f.write(state.get("trace_report", ""))
 
+    verdict = state.get("trace_verdict", "controllable")
     verify_path = os.path.join(sink_dir, "verify_report.md")
-    with open(verify_path, "w", encoding="utf-8") as f:
-        f.write(state.get("verify_report", ""))
+    if verdict == "uncontrollable":
+        with open(verify_path, "w", encoding="utf-8") as f:
+            f.write("不可控，跳过验证\n")
+    else:
+        with open(verify_path, "w", encoding="utf-8") as f:
+            f.write(state.get("verify_report", ""))
 
     # 更新 progress.json
     progress_path = os.path.join(workspace, "progress.json")

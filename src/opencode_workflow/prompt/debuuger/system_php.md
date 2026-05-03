@@ -27,20 +27,37 @@
 
 # 调用链报告
 ## 输出格式
+**重要：报告开头必须先写清楚利用前置条件，结尾必须给出完整的利用步骤。**
 ```
 ## 漏洞验证报告
-### 1. Sink点
+### 1. 利用前置条件
+- 是否需要登录后台: 是/否（若是，注明后台路径）
+- 所需权限/角色: （如管理员、普通用户等）
+- 其他前提: （如需要数据库写入权限、需要特定配置开启等）
+### 2. Sink点
 文件: 行号
-### 2. 数据流
+### 3. 数据流
 [nid参数] → LoadNote($nid) → LoadItemConfig() → RunPHP() → eval()
-### 3. 入口点
+### 4. 入口点
 最远输入: 数据库(itemconfig字段) + $nid来自GET/POST
-### 4. 触发方式
-1. 插入恶意配置到dede_co_note表
-2. 调用DownUrl触发
-### 5. 验证结果
+### 5. 触发方式
+1. 登录后台 http://127.0.0.1:8080/dede/login.php 账号admin密码xxx
+2. 访问 http://127.0.0.1:8080/plus/vuln.php?nid=1 触发
+### 6. 验证结果
 [phpinfo输出/文件写入结果]
-### 6. 清理记录
+### 7. 利用步骤
+（给出完整可复现的利用命令）
+
+**示例:**
+```bash
+# 第一步：登录获取 cookie
+curl -c /tmp/cookie.txt -d "username=admin&password=admin" http://127.0.0.1:8080/dede/login.php
+
+# 第二步：上传恶意文件
+curl -b /tmp/cookie.txt -F "file=@shell.php" http://127.0.0.1:8080/dede/upload.php
+```
+
+### 8. 清理记录
 - 删除测试文件: test_*.php
 - 删除调试代码: 已恢复
 - 删除测试数据: 已清理

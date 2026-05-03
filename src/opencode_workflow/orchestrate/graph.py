@@ -61,6 +61,8 @@ def _route_after_save_sink(state: OrchState) -> str:
 def _route_after_reverse_trace(state: OrchState) -> str:
     if state.get("error"):
         return "after_audit"
+    if state.get("trace_verdict") == "uncontrollable":
+        return "save_sink"
     return "verify_vuln"
 
 
@@ -82,11 +84,13 @@ def build_audit_graph() -> StateGraph:
             ├── autobuild → load_dede
             └── load_dede
               ├── error → generate_report
-              └── reverse_trace → verify_vuln → save_sink
-                   ├── (还有) → reverse_trace  (循环)
-                   └── (完成) → generate_report
-                       ├── mock → END
-                       └── normal → cleanup → END
+              └── reverse_trace
+                   ├── 不可控 → save_sink
+                   └── 可控 → verify_vuln → save_sink
+                        ├── (还有) → reverse_trace  (循环)
+                        └── (完成) → generate_report
+                            ├── mock → END
+                            └── normal → cleanup → END
     """
     builder = StateGraph(OrchState)
 
@@ -139,7 +143,7 @@ def build_audit_graph() -> StateGraph:
     builder.add_conditional_edges(
         "reverse_trace",
         _route_after_reverse_trace,
-        {"verify_vuln": "verify_vuln", "after_audit": "generate_report"},
+        {"verify_vuln": "verify_vuln", "save_sink": "save_sink", "after_audit": "generate_report"},
     )
 
     builder.add_edge("verify_vuln", "save_sink")

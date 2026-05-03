@@ -47,7 +47,7 @@ AGENTS: dict = {
         "mode": "primary",
         "description": "sink点反向溯源专家，只读，追踪污点传播链",
         "permission": AgentConfig.readonly(),
-        "model": {"providerID": "deepseek", "modelID": "deepseek-v4-pro"},
+        "model": {"providerID": "deepseek", "modelID": "deepseek-v4-flash"},
     },
     "debuuger": {
         "mode": "primary",

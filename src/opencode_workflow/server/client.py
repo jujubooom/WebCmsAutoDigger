@@ -362,6 +362,25 @@ class Session:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  配置管理（GET /config + PATCH /config）
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def get_config() -> dict:
+    """读取当前生效的完整配置"""
+    return _req("GET", "/config").json()
+
+
+def patch_config(**kwargs) -> dict:
+    """部分更新配置，传入的键会合并到现有配置中。
+
+    示例:
+      patch_config(permission="allow")                      # 全局允许
+      patch_config(agent={"build": {"options": {"autoApprove": True}}})
+    """
+    return _req("PATCH", "/config", json=kwargs).json()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  Agent 管理（通过 PATCH /config 动态注册 / 删除自定义 Agent）
 # ═══════════════════════════════════════════════════════════════════════════════
 

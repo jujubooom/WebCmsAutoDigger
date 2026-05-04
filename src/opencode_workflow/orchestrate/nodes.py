@@ -8,7 +8,7 @@ from base64 import b64encode
 
 from .state import OrchState
 from ..server import task as task_mgr
-from ..config.profiles import REVERSE_TRACE_TASK, DEBUUGER_SYSTEM, AGENTS
+from ..config.agent_config import TRACER_TASK, TRACER_SYSTEM, VERIFIER_SYSTEM, AGENTS
 from ..server.providers import inject_keys, discover_models, disable_provider_timeout
 
 # autobuild 使用的 skill 来源路径（项目根目录下的 skills/）
@@ -17,70 +17,11 @@ _SKILL_SOURCE = os.path.join(os.path.dirname(__file__), "..", "skills")
 # sss sink 扫描二进制
 _SSS_BIN = os.path.join(os.path.dirname(__file__), "..", "helper", "sss")
 
-# 知识库文件名
-_TRACE_KB = "trace_kb.md"
-_VERIFY_KB = "verify_kb.md"
-
-# 验证脚本目录
-_VERIFY_SCRIPTS = "verify_scripts"
-
-# 追溯反思（简洁 KB 沉淀）
-_TRACE_REFLECTION = (
-    "回顾刚才的追溯过程，有没有调用路径遗漏、分析不够深入或走弯路的地方？\n"
-    "下次做类似追溯，你会怎么提示自己做得更准更快？\n\n"
-    "格式：一个 # 一级标题（不超过15个字），下面1-3句简短说明。"
-)
-
 # 追溯可控判定
 _VERDICT_PROMPT = (
     "请判定以上追溯结果中，该 sink 点的调用链是否可控（能否被攻击者利用）。\n"
     "只回复一个词：可控 或 不可控。不要输出其他内容。"
 )
-
-# 验证反思：先总结踩坑经验（必做）
-_VERIFY_KB_PROMPT = (
-    "请总结这次验证中的踩坑经验，格式：一个 # 一级标题（不超过15个字），正文1-3句。"
-)
-
-# 验证反思：再封装可复用脚本（选做），{WORKSPACE} 由节点替换为绝对路径
-_VERIFY_SCRIPT_PROMPT = (
-    "回顾这次验证过程，有没有哪些步骤可以封装成脚本重复利用？\n"
-    "如果有，请把脚本写到 {WORKSPACE}/verify_scripts/ 目录下。\n\n"
-    "然后在回复中按以下格式输出每个脚本的登记信息（我会自动追加到 verify_kb.md）：\n\n"
-    "```\n"
-    "# <脚本文件名>\n"
-    "用途：<一句话描述>\n"
-    "适用场景：<什么情况下调用>\n"
-    "```\n\n"
-    "如果没有可封装的步骤，直接回复「无」。"
-)
-
-
-def _read_kb(workspace: str, name: str) -> str:
-    """读取知识库内容，不存在则返回空"""
-    path = os.path.join(workspace, name)
-    if os.path.exists(path):
-        with open(path, encoding="utf-8") as f:
-            return f.read().strip()
-    return ""
-
-
-def _append_kb(workspace: str, name: str, content: str):
-    """追加一条经验到知识库"""
-    path = os.path.join(workspace, name)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(content.strip() + "\n\n")
-
-
-def _list_scripts(workspace: str, dirname: str) -> str:
-    """列出脚本目录下的文件路径"""
-    scripts_dir = os.path.join(workspace, dirname)
-    if not os.path.isdir(scripts_dir):
-        return ""
-    names = sorted(os.listdir(scripts_dir))
-    if not names:
-        return ""
-    return "\n".join(f"- {dirname}/{n}" for n in names)
 
 
 def _record_session(state: OrchState, task, title: str, session_id: str) -> str:
@@ -114,7 +55,7 @@ def node_write_agent_config(state: OrchState) -> OrchState:
     if state.get("auto_build") and not state.get("mock"):
         _copy_skills(workspace)
 
-    config = {"agent": {}}
+    config = {"permission": "allow", "agent": {}}
     for name, cfg in state.get("agents", {}).items():
         config["agent"][name] = {
             "mode": cfg.get("mode", "primary"),
@@ -217,6 +158,18 @@ def node_inject_keys(state: OrchState) -> OrchState:
     return state
 
 
+def node_patch_config(state: OrchState) -> OrchState:
+    """通过 PATCH /config 注入 view_config.py 中定义的所有 UI / 行为选项"""
+    if state.get("mock"):
+        return state
+    from ..config.view_config import build_runtime_patch
+    from ..server.client import patch_config
+    body = build_runtime_patch()
+    patch_config(**body)
+    print(f"[config] 已注入运行时配置: {list(body.keys())}")
+    return state
+
+
 def node_discover_models(state: OrchState) -> OrchState:
     """查询 opencode serve 中实际可用的模型，校验别名配置。
     仅 --checkmodel 模式下输出，正常审计时跳过。
@@ -227,7 +180,7 @@ def node_discover_models(state: OrchState) -> OrchState:
 
 
 def node_autobuild(state: OrchState) -> OrchState:
-    """使用 webcms_builder agent 自动搭建 CMS 环境，生成 build_info.md"""
+    """使用 builder agent 自动搭建 CMS 环境，生成 build_info.md"""
     source_dir = state.get("source_dir", state["directory"])
     workspace = state["directory"]
 
@@ -244,30 +197,18 @@ def node_autobuild(state: OrchState) -> OrchState:
     url = _record_session(state, task, "自动搭建CMS", sess.id)
     print(f"项目自动构建中...... 访问 {url} 查看 agent 交互对话")
 
-    model = state["agents"]["webcms_builder"].get("model")
-    result = sess.send_poll(prompt, agent="webcms_builder", model=model)
-    text_parts = [p["text"] for p in result.get("parts", []) if p["type"] == "text"]
-    report = "\n".join(text_parts)
+    model = state["agents"]["builder"].get("model")
+    sess.send_poll(prompt, agent="builder", model=model)
 
+    # AI 直接写入 build_info.md，此处读回供下游节点使用
     build_info_path = os.path.join(workspace, "build_info.md")
-    with open(build_info_path, "w", encoding="utf-8") as f:
-        f.write(report)
-    print(f"构建完成，报告已生成: {build_info_path}")
-
-    state["build_info"] = report
-
-    # 沉淀构建经验到知识库
-    kb_prompt = (
-        "搭建工作已完成。请总结在该 CMS 中进行代码审计时需要注意的问题，"
-        "这些经验将提供给后续的污点追溯和漏洞验证 agent 参考。\n\n"
-        "格式要求：只使用一个 # 一级标题，下面用1-3句简短文字说明。"
-    )
-    kb_result = sess.send_poll(kb_prompt, agent="webcms_builder", model=model)
-    kb_text = "\n".join(p["text"] for p in kb_result.get("parts", []) if p["type"] == "text")
-    if kb_text.strip():
-        _append_kb(workspace, _TRACE_KB, kb_text)
-        _append_kb(workspace, _VERIFY_KB, kb_text)
-        print("构建经验已沉淀到知识库")
+    if os.path.exists(build_info_path):
+        with open(build_info_path, encoding="utf-8") as f:
+            state["build_info"] = f.read()
+        print(f"构建完成，报告已生成: {build_info_path}")
+    else:
+        print("警告: builder 未生成 build_info.md")
+        state["build_info"] = ""
 
     return state
 
@@ -290,7 +231,7 @@ def node_probe_agents(state: OrchState) -> OrchState:
     """探测每个 agent 的 provider/model 是否能正常通信。
 
     对每个 agent 发送"你好"，验证模型可正常回复。
-    若某 agent 无回复或异常，打印警告并建议通过 config/profiles.py 切换 provider/model。
+    若某 agent 无回复或异常，打印警告并建议通过 config/agent_config.py 切换 provider/model。
     """
     if state.get("mock"):
         print("[探测] Mock 模式，跳过连通性探测")
@@ -325,7 +266,7 @@ def node_probe_agents(state: OrchState) -> OrchState:
     if failed:
         print("[探测] ⚠️  以下 agent 连通性探测失败: " + ", ".join(failed))
         print("[探测] 可能原因: 网络问题 或 opencode provider 兼容层问题")
-        print("[探测] 建议: 通过 config/profiles.py 切换 provider 和 model")
+        print("[探测] 建议: 通过 config/agent_config.py 切换 provider 和 model")
     else:
         print("[探测] 模型连接正常")
 
@@ -333,10 +274,8 @@ def node_probe_agents(state: OrchState) -> OrchState:
 
 
 def node_cleanup(state: OrchState) -> OrchState:
-    """清理会话，停止服务"""
+    """停止服务"""
     task = state["task"]
-    result = task.cleanup_my_sessions()
-    print(f"已清理 {result['deleted']} 个会话")
     task.stop()
     print("服务已停止")
     return state
@@ -356,7 +295,7 @@ def node_load_dede(state: OrchState) -> OrchState:
     with open(dede_path, encoding="utf-8") as f:
         all_items = json.load(f)
 
-    state["dede_items"] = all_items[40:45]
+    state["dede_items"] = all_items
     state["sink_total"] = len(all_items)
 
     # 断点续跑：读取 progress.json，跳过已完成的
@@ -398,24 +337,12 @@ def node_reverse_trace(state: OrchState) -> OrchState:
     item = items[idx]
     var_name = item["variable"]
     var_short = var_name.lstrip("$")
-    prompt = (REVERSE_TRACE_TASK
+    prompt = (TRACER_TASK
         .replace("{FILE_PATH}",       item["file"])
         .replace("{LINE}",            str(item["line"]))
         .replace("{SINK_CODE}",       item["code"])
         .replace("{VAR_NAME}",        var_name)
         .replace("{VAR_SHORT_NAME}",  var_short))
-
-    # 读入历史追溯经验 + 可用脚本
-    workspace = state["directory"]
-    prefix = ""
-    kb = _read_kb(workspace, _TRACE_KB)
-    if kb:
-        prefix += f"## 历史追溯经验\n\n{kb}\n\n"
-    scripts = _list_scripts(workspace, _VERIFY_SCRIPTS)
-    if scripts:
-        prefix += f"## 可用验证脚本（按需调用）\n\n{scripts}\n\n"
-    if prefix:
-        prompt = f"{prefix}---\n\n## 当前任务\n\n{prompt}"
 
     task = state["task"]
     title = f"追溯-#{idx + 1}"
@@ -424,15 +351,15 @@ def node_reverse_trace(state: OrchState) -> OrchState:
     url = _record_session(state, task, title, sess.id)
     print(f"[{idx + 1}/{total}] 反向污点追溯中...... 访问 {url} 查看 agent 交互对话")
 
-    model = state["agents"]["sink_reverse_digger"].get("model")
-    result = sess.send_poll(prompt, agent="sink_reverse_digger", model=model)
+    model = state["agents"]["tracer"].get("model")
+    result = sess.send_poll(prompt, agent="tracer", system=TRACER_SYSTEM, model=model)
     text_parts = [p["text"] for p in result.get("parts", []) if p["type"] == "text"]
     state["trace_report"] = "\n".join(text_parts)
     print(f"[{idx + 1}/{total}] 追溯完成")
 
     # 判定调用链可控性
     try:
-        v = sess.send(_VERDICT_PROMPT, agent="sink_reverse_digger", model=model, _timeout=30)
+        v = sess.send(_VERDICT_PROMPT, agent="tracer", model=model, _timeout=30)
         v_text = "\n".join(p["text"] for p in v.get("parts", []) if p["type"] == "text").strip()
         verdict = "controllable" if "可控" in v_text and "不可控" not in v_text else "uncontrollable"
     except Exception:
@@ -440,13 +367,6 @@ def node_reverse_trace(state: OrchState) -> OrchState:
     state["trace_verdict"] = verdict
     label = "可控" if verdict == "controllable" else "不可控"
     print(f"[{idx + 1}/{total}] 判定: {label}")
-
-    # 沉淀追溯经验
-    reflect = sess.send_poll(_TRACE_REFLECTION, agent="sink_reverse_digger", model=model)
-    reflect_text = "\n".join(p["text"] for p in reflect.get("parts", []) if p["type"] == "text")
-    if reflect_text.strip():
-        _append_kb(workspace, _TRACE_KB, reflect_text)
-        print(f"[{idx + 1}/{total}] 经验已沉淀")
 
     return state
 
@@ -472,18 +392,6 @@ def node_verify_vuln(state: OrchState) -> OrchState:
         f"# 追溯报告\n\n{trace_report}"
     )
 
-    # 读入历史验证经验 + 可用脚本
-    workspace = state["directory"]
-    prefix = ""
-    kb = _read_kb(workspace, _VERIFY_KB)
-    if kb:
-        prefix += f"## 历史验证经验\n\n{kb}\n\n"
-    scripts = _list_scripts(workspace, _VERIFY_SCRIPTS)
-    if scripts:
-        prefix += f"## 可用脚本（可直接调用）\n\n{scripts}\n\n"
-    if prefix:
-        user_prompt = f"{prefix}---\n\n## 当前任务\n\n{user_prompt}"
-
     task = state["task"]
     title = f"验证-#{idx + 1}"
     sess = task.create_session(title)
@@ -491,25 +399,11 @@ def node_verify_vuln(state: OrchState) -> OrchState:
     url = _record_session(state, task, title, sess.id)
     print(f"[{idx + 1}/{total}] 漏洞验证中...... 访问 {url} 查看 agent 交互对话")
 
-    model = state["agents"]["debuuger"].get("model")
-    result = sess.send_poll(user_prompt, agent="debuuger", system=DEBUUGER_SYSTEM, model=model)
+    model = state["agents"]["verifier"].get("model")
+    result = sess.send_poll(user_prompt, agent="verifier", system=VERIFIER_SYSTEM, model=model)
     text_parts = [p["text"] for p in result.get("parts", []) if p["type"] == "text"]
     state["verify_report"] = "\n".join(text_parts)
     print(f"[{idx + 1}/{total}] 验证完成")
-
-    # 沉淀验证经验（先踩坑总结，再封装脚本）
-    kb_result = sess.send_poll(_VERIFY_KB_PROMPT, agent="debuuger", model=model)
-    kb_text = "\n".join(p["text"] for p in kb_result.get("parts", []) if p["type"] == "text")
-    if kb_text.strip():
-        _append_kb(workspace, _VERIFY_KB, kb_text)
-        print(f"[{idx + 1}/{total}] 经验已沉淀")
-
-    script_prompt = _VERIFY_SCRIPT_PROMPT.replace("{WORKSPACE}", workspace)
-    script_result = sess.send_poll(script_prompt, agent="debuuger", model=model)
-    script_text = "\n".join(p["text"] for p in script_result.get("parts", []) if p["type"] == "text")
-    if script_text.strip() and script_text.strip() != "无":
-        _append_kb(workspace, _VERIFY_KB, script_text)
-        print(f"[{idx + 1}/{total}] 脚本已生成并登记到 KB")
 
     return state
 

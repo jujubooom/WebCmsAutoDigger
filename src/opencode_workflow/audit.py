@@ -11,8 +11,8 @@
     2. 写入 opencode.json 定义 Agent
     3. 在 workspace 中启动 opencode serve
     4. 读取源码目录下的 dede.json（取第 1 条）
-    5. sink_reverse_digger Agent 进行反向污点追溯
-    6. debuuger Agent 进行漏洞验证
+    5. tracer Agent 进行反向污点追溯
+    6. verifier Agent 进行漏洞验证
     7. 生成审计报告到源码目录
 """
 
@@ -120,11 +120,6 @@ def main():
     source_dir = os.path.abspath(args.dir)
     if not os.path.isdir(source_dir):
         print(f"错误: 目录不存在: {source_dir}")
-        sys.exit(1)
-
-    dede_path = os.path.join(source_dir, "dede.json")
-    if not os.path.exists(dede_path):
-        print(f"错误: 目录下未找到 dede.json: {dede_path}")
         sys.exit(1)
 
     # ── buildinfo ────────────────────────────────────────────────────

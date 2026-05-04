@@ -8,6 +8,7 @@ from .nodes import (
     node_scan_sinks,
     node_start_task,
     node_inject_keys,
+    node_patch_config,
     node_discover_models,
     node_setup_agents,
     node_probe_agents,
@@ -98,6 +99,7 @@ def build_audit_graph() -> StateGraph:
     builder.add_node("scan_sinks",       node_scan_sinks)
     builder.add_node("start_task",       node_start_task)
     builder.add_node("inject_keys",      node_inject_keys)
+    builder.add_node("patch_config",     node_patch_config)
     builder.add_node("discover_models",  node_discover_models)
     builder.add_node("setup_agents",     node_setup_agents)
     builder.add_node("probe_agents",     node_probe_agents)
@@ -123,7 +125,8 @@ def build_audit_graph() -> StateGraph:
         {"start_task": "start_task", "generate_report": "generate_report"},
     )
     builder.add_edge("start_task", "inject_keys")
-    builder.add_edge("inject_keys", "discover_models")
+    builder.add_edge("inject_keys", "patch_config")
+    builder.add_edge("patch_config", "discover_models")
     builder.add_edge("discover_models", "setup_agents")
     builder.add_edge("setup_agents", "probe_agents")
 

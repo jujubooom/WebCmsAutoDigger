@@ -279,9 +279,13 @@ def open_serve(
     if extra_args:
         cmd.extend(extra_args)
 
+    env = os.environ.copy()
+    env["OPENCODE_PERMISSION"] = '"allow"'
+
     proc = subprocess.Popen(
         cmd,
         cwd=directory,
+        env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )

@@ -217,6 +217,7 @@ class Session:
         self.send_async(text, agent=agent, model=model, system=system)
 
         deadline = time.time() + max_wait
+        seen_running = False
         while time.time() < deadline:
             try:
                 statuses = _req("GET", "/session/status").json()
@@ -224,7 +225,12 @@ class Session:
                 time.sleep(poll_interval)
                 continue
             if self.id not in statuses:
-                break  # 会话已完成（不在运行列表中）
+                if seen_running:
+                    break  # 会话已完成
+                # 尚未注册到 status，等一会再查
+                time.sleep(poll_interval)
+                continue
+            seen_running = True
             time.sleep(poll_interval)
         else:
             raise TimeoutError(

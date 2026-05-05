@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 from base64 import b64encode
+from collections import defaultdict
 
 from .state import OrchState
 from ..server import task as task_mgr
@@ -16,13 +17,6 @@ _SKILL_SOURCE = os.path.join(os.path.dirname(__file__), "..", "skills")
 
 # sss sink 扫描二进制
 _SSS_BIN = os.path.join(os.path.dirname(__file__), "..", "helper", "sss")
-
-# 追溯可控判定
-_VERDICT_PROMPT = (
-    "请判定以上追溯结果中，该 sink 点的调用链是否可控（能否被攻击者利用）。\n"
-    "只回复一个词：可控 或 不可控。不要输出其他内容。"
-)
-
 
 def _record_session(state: OrchState, task, title: str, session_id: str) -> str:
     """记录 session 对应的可视化 URL，供报告展示。返回 URL 字符串。"""
@@ -227,52 +221,6 @@ def node_setup_agents(state: OrchState) -> OrchState:
     return state
 
 
-def node_probe_agents(state: OrchState) -> OrchState:
-    """探测每个 agent 的 provider/model 是否能正常通信。
-
-    对每个 agent 发送"你好"，验证模型可正常回复。
-    若某 agent 无回复或异常，打印警告并建议通过 config/agent_config.py 切换 provider/model。
-    """
-    if state.get("mock"):
-        print("[探测] Mock 模式，跳过连通性探测")
-        return state
-
-    task = state["task"]
-    agents = state.get("agents", {})
-    if not agents:
-        return state
-
-    failed: list[str] = []
-    for name, cfg in agents.items():
-        model = cfg.get("model")
-        if not model:
-            continue
-
-        provider = model.get("providerID", "?")
-        model_id = model.get("modelID", "?")
-        try:
-            sess = task.create_session(f"探测-{name}")
-            state["sessions"].append(sess.id)
-            result = sess.send("你好", agent=name, model=model, _timeout=15)
-            text_parts = [p["text"] for p in result.get("parts", []) if p.get("type") == "text"]
-            reply = "".join(text_parts).strip()
-            if not reply:
-                print(f"[探测] ❌ {name} ({provider}/{model_id}) 无回复")
-                failed.append(name)
-        except Exception as exc:
-            print(f"[探测] ❌ {name} ({provider}/{model_id}) 异常: {exc}")
-            failed.append(name)
-
-    if failed:
-        print("[探测] ⚠️  以下 agent 连通性探测失败: " + ", ".join(failed))
-        print("[探测] 可能原因: 网络问题 或 opencode provider 兼容层问题")
-        print("[探测] 建议: 通过 config/agent_config.py 切换 provider 和 model")
-    else:
-        print("[探测] 模型连接正常")
-
-    return state
-
-
 def node_cleanup(state: OrchState) -> OrchState:
     """停止服务"""
     task = state["task"]
@@ -285,8 +233,10 @@ def node_cleanup(state: OrchState) -> OrchState:
 #  审计工作流节点
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
+
 def node_load_dede(state: OrchState) -> OrchState:
-    """加载全量 sink 点，初始化断点续跑进度。"""
+    """加载全量 sink 点，按 (文件, 危险函数) 分组，初始化断点续跑进度。"""
     dede_path = os.path.join(state["directory"], "dede.json")
     if not os.path.exists(dede_path):
         state["error"] = f"dede.json 不存在: {dede_path}"
@@ -296,213 +246,217 @@ def node_load_dede(state: OrchState) -> OrchState:
         all_items = json.load(f)
 
     state["dede_items"] = all_items
-    state["sink_total"] = len(all_items)
 
-    # 断点续跑：读取 progress.json，跳过已完成的
+    # 按 (文件, 危险函数) 分组
+    group_map: dict[tuple, list] = defaultdict(list)
+    for item in all_items:
+        key = (item["file"], item["sink"])
+        group_map[key].append(item)
+
+    groups = [
+        {"file": file, "func": func, "items": items}
+        for (file, func), items in group_map.items()
+    ]
+    # 按文件排序，同文件按函数名排序
+    groups.sort(key=lambda g: (g["file"], g["func"]))
+
+    state["groups"] = groups
+    state["group_total"] = len(groups)
+
+    # 初始化审计报告索引文件（断点续跑不覆盖）
+    report_path = os.path.join(state["directory"], "audit_report.md")
+    if not os.path.exists(report_path):
+        source_dir = state.get("source_dir", state["directory"])
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(
+                f"# 审计报告\n\n"
+                f"源码目录: {source_dir}\n\n"
+                f"| 漏洞类型 | 前置条件 | 详细报告路径 |\n"
+                f"|---------|---------|------------|\n"
+            )
+
+    # 断点续跑：读取 progress.json，跳过已完成的组
     progress_path = os.path.join(state["directory"], "progress.json")
     done: set[int] = set()
     if os.path.exists(progress_path):
         with open(progress_path, encoding="utf-8") as f:
             progress = json.load(f)
-        done = {e["index"] for e in progress.get("sinks", []) if e.get("status") == "done"}
+        done = {e["group_index"] for e in progress.get("groups", []) if e.get("status") == "done"}
 
-    # 找到第一个未完成的 sink
     idx = 0
-    while idx < len(all_items) and idx in done:
+    while idx < len(groups) and idx in done:
         idx += 1
 
-    if idx >= len(all_items):
-        state["sink_index"] = len(all_items)  # 全部完成
-        print(f"全部 {len(all_items)} 条 sink 点已完成")
+    if idx >= len(groups):
+        state["group_index"] = len(groups)
+        print(f"全部 {len(groups)} 组已完成（共 {len(all_items)} 个 sink 点）")
     else:
-        state["sink_index"] = idx
+        state["group_index"] = idx
         skipped = len(done)
         if skipped:
-            print(f"断点续跑: 已完成 {skipped} 条，从 #{idx + 1} 开始")
+            print(f"断点续跑: 已完成 {skipped} 组，从第 #{idx + 1} 组开始")
         else:
-            print(f"加载 {len(all_items)} 条 sink 点，开始审计")
+            print(f"加载 {len(groups)} 组（共 {len(all_items)} 个 sink 点），开始审计")
 
     return state
 
 
 def node_reverse_trace(state: OrchState) -> OrchState:
-    """对当前 sink 点进行反向污点追溯"""
-    items = state.get("dede_items", [])
-    idx = state.get("sink_index", 0)
-    total = state.get("sink_total", len(items))
-    if idx >= len(items):
-        state["error"] = f"sink 索引越界: {idx} >= {len(items)}"
+    """对当前分组进行反向污点追溯。
+
+    拆分为两个独立对话：
+      对话1 — 追溯分析 + 写入 trace_report.md + 维护 trace_kb.md
+      对话2 — 读取报告，返回判定：可控 / 不可控
+    """
+    state.pop("error", None)
+    groups = state.get("groups", [])
+    idx = state.get("group_index", 0)
+    total = state.get("group_total", len(groups))
+    if idx >= len(groups):
+        state["error"] = f"分组索引越界: {idx} >= {len(groups)}"
         return state
 
-    item = items[idx]
-    var_name = item["variable"]
-    var_short = var_name.lstrip("$")
-    prompt = (TRACER_TASK
-        .replace("{FILE_PATH}",       item["file"])
-        .replace("{LINE}",            str(item["line"]))
-        .replace("{SINK_CODE}",       item["code"])
-        .replace("{VAR_NAME}",        var_name)
-        .replace("{VAR_SHORT_NAME}",  var_short))
+    group = groups[idx]
+    file = group["file"]
+    func = group["func"]
+    items = group["items"]
+
+    workspace = state["directory"]
+    group_dir = os.path.join(workspace, "sinks", f"G{idx:04d}")
+    os.makedirs(group_dir, exist_ok=True)
+    trace_path = os.path.join(group_dir, "trace_report.md")
+
+    sink_lines = []
+    for item in items:
+        sink_lines.append(
+            f"- 行 {item['line']}, 变量 `{item['variable']}`: `{item['code']}`"
+        )
+    sink_list = "\n".join(sink_lines)
 
     task = state["task"]
-    title = f"追溯-#{idx + 1}"
-    sess = task.create_session(title)
-    state["sessions"].append(sess.id)
-    url = _record_session(state, task, title, sess.id)
-    print(f"[{idx + 1}/{total}] 反向污点追溯中...... 访问 {url} 查看 agent 交互对话")
-
     model = state["agents"]["tracer"].get("model")
-    result = sess.send_poll(prompt, agent="tracer", system=TRACER_SYSTEM, model=model)
-    text_parts = [p["text"] for p in result.get("parts", []) if p["type"] == "text"]
-    state["trace_report"] = "\n".join(text_parts)
-    print(f"[{idx + 1}/{total}] 追溯完成")
 
-    # 判定调用链可控性
+    # ── 对话1: 追溯分析 + 写入报告 + 维护 trace_kb ──────────────
+    trace_prompt = (TRACER_TASK
+        .replace("{FILE_PATH}",  file)
+        .replace("{SINK_FUNC}",  func)
+        .replace("{SINK_LIST}",  sink_list)
+        .replace("{TRACE_PATH}", trace_path))
+
+    sess = task.create_session(f"追溯-G{idx + 1}")
+    state["sessions"].append(sess.id)
+    url = _record_session(state, task, f"追溯-G{idx + 1}", sess.id)
+    print(f"[G{idx + 1}/{total}] 追溯 {func} @ {file}（{len(items)} 个 sink）→ {url}")
+
+    sess.send_poll(trace_prompt, agent="tracer", system=TRACER_SYSTEM, model=model)
+    print(f"[G{idx + 1}/{total}] 追溯完成")
+
+    # 同一对话追加判定消息，模型有完整上下文
+    verdict_prompt = "请基于以上追溯结果，判定这些 sink 点的调用链是否可控（能否被攻击者利用）。只回复一个词：可控 或 不可控。"
     try:
-        v = sess.send(_VERDICT_PROMPT, agent="tracer", model=model, _timeout=30)
+        v = sess.send(verdict_prompt, agent="tracer", model=model, _timeout=60)
         v_text = "\n".join(p["text"] for p in v.get("parts", []) if p["type"] == "text").strip()
-        verdict = "controllable" if "可控" in v_text and "不可控" not in v_text else "uncontrollable"
+        verdict = "uncontrollable" if "不可控" in v_text else "controllable"
     except Exception:
-        verdict = "controllable"  # 判定失败默认走验证
+        verdict = "controllable"
     state["trace_verdict"] = verdict
     label = "可控" if verdict == "controllable" else "不可控"
-    print(f"[{idx + 1}/{total}] 判定: {label}")
+    print(f"[G{idx + 1}/{total}] 判定: {label}")
 
     return state
 
 
 def node_verify_vuln(state: OrchState) -> OrchState:
-    """对当前 sink 的追溯结果进行漏洞验证"""
-    trace_report = state.get("trace_report", "")
-    if not trace_report:
-        state["error"] = "追溯报告为空，跳过验证"
+    """对当前分组的追溯结果进行漏洞验证，同 session 内追加摘要到审计报告。"""
+    idx = state.get("group_index", 0)
+    total = state.get("group_total", 0)
+    group = state["groups"][idx]
+    workspace = state["directory"]
+    group_dir = os.path.join(workspace, "sinks", f"G{idx:04d}")
+    trace_path = os.path.join(group_dir, "trace_report.md")
+    verify_path = os.path.join(group_dir, "verify_report.md")
+    audit_path = os.path.join(workspace, "audit_report.md")
+
+    if not os.path.exists(trace_path):
+        state["error"] = f"追溯报告不存在: {trace_path}"
         return state
 
-    idx = state.get("sink_index", 0)
-    total = state.get("sink_total", 0)
-    build_info = state.get("build_info", "")
     build_section = ""
+    build_info = state.get("build_info", "")
     if build_info:
         build_section = f"## 目标环境信息\n\n{build_info}\n\n"
 
-    user_prompt = (
-        "以下是反向污点追溯的报告，请根据报告中的调用链信息，"
-        "在真实环境中验证这些漏洞是否可触发。\n\n"
+    task = state["task"]
+    model = state["agents"]["verifier"].get("model")
+
+    verify_prompt = (
+        f"请读取 {trace_path} 中的追溯报告，在真实环境中验证这些漏洞是否可触发。\n\n"
+        f"**目标文件**: {group['file']}\n"
+        f"**危险函数**: {group['func']}\n"
+        f"**Sink 数量**: {len(group['items'])}\n\n"
         f"{build_section}"
-        f"# 追溯报告\n\n{trace_report}"
+        f"完成后将详细验证报告写入 {verify_path}。"
     )
 
-    task = state["task"]
-    title = f"验证-#{idx + 1}"
-    sess = task.create_session(title)
+    sess = task.create_session(f"验证-G{idx + 1}")
     state["sessions"].append(sess.id)
-    url = _record_session(state, task, title, sess.id)
-    print(f"[{idx + 1}/{total}] 漏洞验证中...... 访问 {url} 查看 agent 交互对话")
+    url = _record_session(state, task, f"验证-G{idx + 1}", sess.id)
+    print(f"[G{idx + 1}/{total}] 漏洞验证中...... 访问 {url} 查看 agent 交互对话")
 
-    model = state["agents"]["verifier"].get("model")
-    result = sess.send_poll(user_prompt, agent="verifier", system=VERIFIER_SYSTEM, model=model)
-    text_parts = [p["text"] for p in result.get("parts", []) if p["type"] == "text"]
-    state["verify_report"] = "\n".join(text_parts)
-    print(f"[{idx + 1}/{total}] 验证完成")
+    sess.send_poll(verify_prompt, agent="verifier", system=VERIFIER_SYSTEM, model=model)
+    print(f"[G{idx + 1}/{total}] 验证完成")
+
+    # 同一对话追加摘要消息
+    summary_prompt = (
+        f"请基于以上验证结果，用一句话总结漏洞类型和利用前置条件。\n"
+        f"然后读取 {audit_path}，在表格末尾追加一行：\n"
+        f"| 漏洞类型 | 前置条件 | {group_dir}/ |\n"
+        f"只写这一行，不要输出其他内容。"
+    )
+    try:
+        sess.send(summary_prompt, agent="verifier", model=model)
+    except Exception as e:
+        print(f"[G{idx + 1}/{total}] 摘要写入失败: {e}")
 
     return state
 
 
 def node_save_sink(state: OrchState) -> OrchState:
-    """保存当前 sink 的追溯和验证报告，更新进度，前进到下一条。"""
-    idx = state.get("sink_index", 0)
-    total = state.get("sink_total", 0)
+    """写入组信息和进度，前进到下一组。报告文件由 tracer/verifier 直接写入。"""
+    idx = state.get("group_index", 0)
+    total = state.get("group_total", 0)
     workspace = state["directory"]
+    group_dir = os.path.join(workspace, "sinks", f"G{idx:04d}")
 
-    # per-sink 目录
-    sink_dir = os.path.join(workspace, "sinks", f"{idx:04d}")
-    os.makedirs(sink_dir, exist_ok=True)
+    # 写入组信息
+    group = state["groups"][idx]
+    with open(os.path.join(group_dir, "group_info.json"), "w", encoding="utf-8") as f:
+        json.dump(group, f, ensure_ascii=False, indent=2)
 
-    trace_path = os.path.join(sink_dir, "trace_report.md")
-    with open(trace_path, "w", encoding="utf-8") as f:
-        f.write(state.get("trace_report", ""))
-
-    verdict = state.get("trace_verdict", "controllable")
-    verify_path = os.path.join(sink_dir, "verify_report.md")
-    if verdict == "uncontrollable":
+    # 不可控时写入跳过标记（无需 AI）
+    if state.get("trace_verdict") == "uncontrollable":
+        verify_path = os.path.join(group_dir, "verify_report.md")
         with open(verify_path, "w", encoding="utf-8") as f:
             f.write("不可控，跳过验证\n")
-    else:
-        with open(verify_path, "w", encoding="utf-8") as f:
-            f.write(state.get("verify_report", ""))
 
-    # 更新 progress.json
+    # 更新进度
     progress_path = os.path.join(workspace, "progress.json")
     progress: dict = {}
     if os.path.exists(progress_path):
         with open(progress_path, encoding="utf-8") as f:
             progress = json.load(f)
-    progress.setdefault("sinks", []).append({"index": idx, "status": "done"})
-    progress["total"] = total
+    progress.setdefault("groups", []).append({"group_index": idx, "status": "done"})
+    progress["group_total"] = total
     with open(progress_path, "w", encoding="utf-8") as f:
         json.dump(progress, f, ensure_ascii=False, indent=2)
 
-    state["sink_index"] = idx + 1
-    print(f"[{idx + 1}/{total}] 已保存 → {sink_dir}")
+    state["group_index"] = idx + 1
+    print(f"[G{idx + 1}/{total}] 已保存 → {group_dir}")
     return state
 
 
 def node_generate_audit_report(state: OrchState) -> OrchState:
-    """汇总所有 sink 的审计结果，生成结构化最终报告。"""
-    workspace = state["directory"]
-    source_dir = state.get("source_dir", workspace)
-    total = state.get("sink_total", 0)
-    sinks_dir = os.path.join(workspace, "sinks")
-
-    lines = [
-        "# PHP 代码审计报告",
-        "",
-        f"**源码目录**: {source_dir}",
-        f"**Sink 总数**: {total}",
-        "",
-        "---",
-        "",
-    ]
-
-    for i in range(total):
-        sd = os.path.join(sinks_dir, f"{i:04d}")
-        trace_path = os.path.join(sd, "trace_report.md")
-        verify_path = os.path.join(sd, "verify_report.md")
-
-        item = state["dede_items"][i] if i < len(state["dede_items"]) else {}
-        done = os.path.exists(trace_path)
-        status = "✅ 已完成" if done else "⏳ 未审计"
-
-        lines.append(f"## Sink #{i + 1}  {status}")
-        lines.append("")
-        lines.append(f"- **文件**: `{item.get('file', '?')}`")
-        lines.append(f"- **行号**: {item.get('line', '?')}")
-        lines.append(f"- **变量**: `{item.get('variable', '?')}`")
-        lines.append(f"- **代码**: `{item.get('code', '?')}`")
-        lines.append("")
-
-        if done:
-            with open(trace_path, encoding="utf-8") as f:
-                trace = f.read()
-            lines.append("### 追溯分析")
-            lines.append("")
-            lines.append(trace)
-            lines.append("")
-
-            with open(verify_path, encoding="utf-8") as f:
-                verify = f.read()
-            lines.append("### 漏洞验证")
-            lines.append("")
-            lines.append(verify)
-            lines.append("")
-
-        lines.append("---")
-        lines.append("")
-
-    state["final_report"] = "\n".join(lines)
-
-    report_path = os.path.join(workspace, "audit_report.md")
-    with open(report_path, "w", encoding="utf-8") as f:
-        f.write(state["final_report"])
-    print(f"审计报告已生成: {report_path}")
+    """审计报告已由 verifier 逐组追加完成，此节点仅输出路径。"""
+    report_path = os.path.join(state["directory"], "audit_report.md")
+    print(f"审计报告: {report_path}")
     return state

@@ -16,13 +16,11 @@ class OrchState(TypedDict, total=False):
     error: str                            # 错误信息
 
     # ── 审计工作流专用字段 ──────────────────────────────────────────
-    dede_items: list[dict]               # dede.json 中取出的 sink 点列表
-    sink_index: int                       # 当前正在处理的 sink 下标（0-based）
-    sink_total: int                       # sink 总数
-    trace_report: str                     # 当前 sink 的追溯报告
+    dede_items: list[dict]               # dede.json 中取出的全量 sink 点列表
+    groups: list[dict]                   # 分组后的审计单元: [{file, func, items: [sinks]}]
+    group_index: int                      # 当前正在处理的组下标（0-based）
+    group_total: int                      # 分组总数
     trace_verdict: str                    # 追溯判定: "controllable" | "uncontrollable"
-    verify_report: str                    # 当前 sink 的漏洞验证报告
-    final_report: str                     # 最终汇总报告
     build_info: str                      # CMS 搭建信息（markdown），拼入验证提示词
     auto_build: bool                      # 是否自动搭建 CMS 环境
     check_model: bool                     # 是否输出 provider/model 列表（仅 --checkmodel 时）

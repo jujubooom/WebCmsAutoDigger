@@ -11,7 +11,6 @@ from .nodes import (
     node_patch_config,
     node_discover_models,
     node_setup_agents,
-    node_probe_agents,
     node_autobuild,
     node_cleanup,
     node_load_dede,
@@ -46,15 +45,14 @@ def _route_after_scan(state: OrchState) -> str:
 def _route_after_load_dede(state: OrchState) -> str:
     if state.get("error"):
         return "after_audit"
-    # 断点续跑：全部完成则直接生成报告
-    if state.get("sink_index", 0) >= state.get("sink_total", 0):
+    if state.get("group_index", 0) >= state.get("group_total", 0):
         return "after_audit"
     return "reverse_trace"
 
 
 def _route_after_save_sink(state: OrchState) -> str:
-    """还有未处理的 sink → 循环回 reverse_trace，全部完成 → 生成报告"""
-    if state.get("sink_index", 0) < state.get("sink_total", 0):
+    """还有未处理的分组 → 循环回 reverse_trace，全部完成 → 生成报告"""
+    if state.get("group_index", 0) < state.get("group_total", 0):
         return "reverse_trace"
     return "generate_report"
 
@@ -80,8 +78,8 @@ def build_audit_graph() -> StateGraph:
     图结构:
       START → write_config
         ├── mock → load_dede
-        └── normal → scan_sinks → start_task → inject_keys → discover_models
-            → setup_agents → probe_agents
+        └── normal → scan_sinks → start_task → inject_keys → patch_config
+            → discover_models → setup_agents
             ├── autobuild → load_dede
             └── load_dede
               ├── error → generate_report
@@ -102,7 +100,6 @@ def build_audit_graph() -> StateGraph:
     builder.add_node("patch_config",     node_patch_config)
     builder.add_node("discover_models",  node_discover_models)
     builder.add_node("setup_agents",     node_setup_agents)
-    builder.add_node("probe_agents",     node_probe_agents)
     builder.add_node("autobuild",        node_autobuild)
     builder.add_node("load_dede",        node_load_dede)
     builder.add_node("reverse_trace",    node_reverse_trace)
@@ -128,10 +125,8 @@ def build_audit_graph() -> StateGraph:
     builder.add_edge("inject_keys", "patch_config")
     builder.add_edge("patch_config", "discover_models")
     builder.add_edge("discover_models", "setup_agents")
-    builder.add_edge("setup_agents", "probe_agents")
-
     builder.add_conditional_edges(
-        "probe_agents",
+        "setup_agents",
         _route_after_setup_agents,
         {"autobuild": "autobuild", "load_dede": "load_dede"},
     )

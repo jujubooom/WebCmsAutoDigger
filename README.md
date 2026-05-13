@@ -159,7 +159,7 @@ Verifier Agent ───────── 动态验证漏洞可利用性（Dock
 
 ### 使用到的框架
 
-- [OpenCode](https://github.com/anthropics/opencode) — Anthropic 的 agentic 编码平台
+- [OpenCode](https://github.com/opencode-ai/opencode) — 开源的 agentic 编码平台
 - [LangGraph](https://langgraph.com.cn/) — 工作流编排
 
 ### 作者

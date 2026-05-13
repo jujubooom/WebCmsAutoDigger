@@ -7,10 +7,10 @@ import subprocess
 from base64 import b64encode
 from collections import defaultdict
 
-from .state import OrchState
-from ..server import task as task_mgr
-from ..config.agent_config import TRACER_TASK, TRACER_SYSTEM, VERIFIER_SYSTEM, AGENTS
-from ..server.providers import inject_keys, discover_models, disable_provider_timeout
+from orchestrate.state import OrchState
+from server import task as task_mgr
+from config.agent_config import TRACER_TASK, TRACER_SYSTEM, VERIFIER_SYSTEM, AGENTS
+from server.providers import inject_keys, discover_models, disable_provider_timeout
 
 # autobuild 使用的 skill 来源路径（项目根目录下的 skills/）
 _SKILL_SOURCE = os.path.join(os.path.dirname(__file__), "..", "skills")
@@ -72,14 +72,14 @@ def node_write_agent_config(state: OrchState) -> OrchState:
             _session_ids: list = field(default_factory=list)
 
             def create_session(self, title: str = "Task", **kwargs):
-                from ..server.client import Session
+                from server.client import Session
                 kwargs.setdefault("directory", self.directory)
                 sess = Session.create(title=title, **kwargs)
                 self._session_ids.append(sess.id)
                 return sess
 
             def cleanup_my_sessions(self):
-                from ..server.client import Session
+                from server.client import Session
                 for sid in list(self._session_ids):
                     try:
                         Session.delete_by_id(sid)
@@ -103,14 +103,32 @@ def node_write_agent_config(state: OrchState) -> OrchState:
 
 
 def node_scan_sinks(state: OrchState) -> OrchState:
-    """使用 sss 扫描源码目录，生成 dede.json 到工作目录。mock 模式跳过。"""
+    """生成 dede.json 到工作目录。
+
+    --loadjson: 从指定文件复制
+    正常模式:  使用 sss 扫描源码目录
+    mock 模式: 跳过
+    """
     if state.get("mock"):
         return state
 
-    source_dir = state.get("source_dir", state["directory"])
     workspace = state["directory"]
     dede_path = os.path.join(workspace, "dede.json")
 
+    # ── loadjson 模式：直接从指定文件加载 ──
+    loadjson = state.get("loadjson", "")
+    if loadjson:
+        if not os.path.exists(loadjson):
+            state["error"] = f"--loadjson 文件不存在: {loadjson}"
+            return state
+        shutil.copyfile(loadjson, dede_path)
+        with open(dede_path, encoding="utf-8") as f:
+            items = json.load(f)
+        print(f"已从 {loadjson} 加载 sink 点，共 {len(items)} 条")
+        return state
+
+    # ── 正常模式：sss 扫描 ──
+    source_dir = state.get("source_dir", state["directory"])
     try:
         result = subprocess.run(
             [_SSS_BIN, "-dir", source_dir, "-lang", "php", "-output", "json"],
@@ -156,8 +174,8 @@ def node_patch_config(state: OrchState) -> OrchState:
     """通过 PATCH /config 注入 view_config.py 中定义的所有 UI / 行为选项"""
     if state.get("mock"):
         return state
-    from ..config.view_config import build_runtime_patch
-    from ..server.client import patch_config
+    from config.view_config import build_runtime_patch
+    from server.client import patch_config
     body = build_runtime_patch()
     patch_config(**body)
     print(f"[config] 已注入运行时配置: {list(body.keys())}")

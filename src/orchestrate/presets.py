@@ -1,5 +1,5 @@
-from .state import OrchState
-from ..config.agent_config import AGENTS
+from orchestrate.state import OrchState
+from config.agent_config import AGENTS
 
 
 def new_audit_task(
@@ -9,6 +9,7 @@ def new_audit_task(
     build_info: str = "",
     auto_build: bool = False,
     check_model: bool = False,
+    loadjson: str = "",
 ) -> OrchState:
     """创建 PHP 代码审计任务的初始状态。
 
@@ -17,6 +18,8 @@ def new_audit_task(
     mock:          是否启用 mock 模式（跳过 LLM 交互，使用预置响应）
     build_info:    CMS 搭建信息（markdown 文本），拼入 verifier 验证提示词
     auto_build:    是否自动搭建 CMS 环境（启用 builder agent）
+    check_model:   是否输出 provider/model 列表（仅 --checkmodel 时）
+    loadjson:      从指定文件加载 sink JSON（跳过 sss 扫描）
 
     使用 tracer + verifier 完成审计；
     若 auto_build 则额外启用 builder 自动搭建 CMS。
@@ -37,5 +40,6 @@ def new_audit_task(
         build_info=build_info,
         auto_build=auto_build,
         check_model=check_model,
+        loadjson=loadjson,
         error="",
     )

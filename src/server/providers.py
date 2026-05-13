@@ -36,7 +36,7 @@ def disable_provider_timeout(task, provider_ids: list[str]) -> None:
 
     opencode 默认 provider 超时为 300s（5 分钟），设为 false 彻底关闭。
     """
-    from .client import _req
+    from server.client import _req
 
     task._use()
     for pid in provider_ids:

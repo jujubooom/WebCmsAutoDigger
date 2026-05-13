@@ -1,10 +1,11 @@
 """PHP 代码审计入口。
 
 用法:
-    python -m opencode_workflow.audit --dir /path/to/dede/project [--name task_name]
-    python -m opencode_workflow.audit --checkmodel
-    python -m opencode_workflow.audit --dir /path --buildinfo /path/to/info.md
-    python -m opencode_workflow.audit --dir /path --autobuild
+    python main.py --dir /path/to/dede/project [--name task_name]
+    python main.py --checkmodel
+    python main.py --dir /path --buildinfo /path/to/info.md
+    python main.py --dir /path --autobuild
+    python main.py --dir /path --loadjson /path/to/dede.json
 
 工作流:
     1. 在项目目录下创建 workspace/{task_name}/ 作为隔离工作区
@@ -23,14 +24,19 @@ import os
 import tempfile
 from datetime import datetime
 
-from .orchestrate.graph import build_audit_graph
-from .orchestrate.presets import new_audit_task
+# 支持直接 python main.py 启动
+_self_dir = os.path.dirname(os.path.abspath(__file__))
+if _self_dir not in sys.path:
+    sys.path.insert(0, _self_dir)
+
+from orchestrate.graph import build_audit_graph
+from orchestrate.presets import new_audit_task
 
 
 def cmd_checkmodel():
     """启动临时 opencode serve，列出所有 provider 及其模型、key 配置状态。"""
-    from .server import task as task_mgr
-    from .server.providers import inject_keys, discover_models
+    from server import task as task_mgr
+    from server.providers import inject_keys, discover_models
 
     tmpdir = tempfile.mkdtemp(prefix="opencode_checkmodel_")
     print(f"[checkmodel] 临时工作区: {tmpdir}")
@@ -99,6 +105,11 @@ def main():
         default=False,
         help="自动搭建 CMS 环境（Docker 构建 + Web 安装，生成 build_info.md）",
     )
+    parser.add_argument(
+        "--loadjson",
+        default=None,
+        help="从指定文件加载 sink 点 JSON（跳过 sss 扫描），如 dede.json",
+    )
     args = parser.parse_args()
 
     # ── checkmodel 模式 ──────────────────────────────────────────────
@@ -114,7 +125,7 @@ def main():
         sys.exit(1)
 
     if args.mock:
-        from .mock import enable
+        from mock import enable
         enable()
 
     source_dir = os.path.abspath(args.dir)
@@ -130,7 +141,7 @@ def main():
 
     task_name = args.name or datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # workspace 放在 opencode_workflow 根目录下
+    # workspace 放在 src 根目录下
     project_root = os.path.dirname(os.path.abspath(__file__))
     workspace_dir = os.path.join(project_root, "workspace", task_name)
     os.makedirs(workspace_dir, exist_ok=True)
@@ -148,6 +159,7 @@ def main():
         build_info=build_info,
         auto_build=args.autobuild,
         check_model=args.checkmodel,
+        loadjson=args.loadjson or "",
     )
     print(f"已加载Agents: {list(state['agents'].keys())}")
     try:

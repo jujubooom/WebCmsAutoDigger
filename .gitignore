@@ -8,5 +8,8 @@ wheels/
 
 # Virtual environments
 .venv
-src/opencode_workflow/workspace/
-src/opencode_workflow/workspace/
+
+# Runtime
+workspace/
+test/
+.claude/

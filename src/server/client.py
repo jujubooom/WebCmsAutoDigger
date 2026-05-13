@@ -72,7 +72,7 @@ class Session:
                     不传则使用服务端当前实例目录。
         project_id: 显式指定项目 ID，通常无需传（由 directory 自动推导）。
         """
-        from ..mock import MOCK_ENABLED
+        from mock import MOCK_ENABLED
         if MOCK_ENABLED:
             import uuid
             fake_id = "mock_" + uuid.uuid4().hex[:12]
@@ -107,7 +107,7 @@ class Session:
     @classmethod
     def delete_by_id(cls, session_id: str) -> bool:
         """【类方法】根据 ID 删除任意会话，不需要先持有 Session 实例。"""
-        from ..mock import MOCK_ENABLED
+        from mock import MOCK_ENABLED
         if MOCK_ENABLED:
             return True
         return _req("DELETE", f"/session/{session_id}").json()
@@ -155,7 +155,7 @@ class Session:
 
         返回: {"info": Message, "parts": [Part, ...]}
         """
-        from ..mock import MOCK_ENABLED, get_response
+        from mock import MOCK_ENABLED, get_response
         if MOCK_ENABLED:
             print(f"  [MOCK] 返回预置响应: {self.title}")
             return get_response(self.title)
@@ -207,7 +207,7 @@ class Session:
 
         返回格式与 send() 一致: {"info": Message, "parts": [Part, ...]}
         """
-        from ..mock import MOCK_ENABLED, get_response
+        from mock import MOCK_ENABLED, get_response
         if MOCK_ENABLED:
             print(f"  [MOCK] 返回预置响应: {self.title}")
             return get_response(self.title)

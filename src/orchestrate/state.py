@@ -2,7 +2,7 @@
 
 from typing import TypedDict
 
-from ..server.task import OpenCodeTask
+from server.task import OpenCodeTask
 
 
 class OrchState(TypedDict, total=False):
@@ -24,4 +24,5 @@ class OrchState(TypedDict, total=False):
     build_info: str                      # CMS 搭建信息（markdown），拼入验证提示词
     auto_build: bool                      # 是否自动搭建 CMS 环境
     check_model: bool                     # 是否输出 provider/model 列表（仅 --checkmodel 时）
+    loadjson: str                         # 从指定文件加载 sink JSON（跳过 sss 扫描）
     session_urls: list[dict]              # 可视化链接 [{title, url}]，供报告展示

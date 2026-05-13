@@ -32,7 +32,7 @@ from typing import Optional
 
 import requests
 
-from . import client as sdk
+from server import client as sdk
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
